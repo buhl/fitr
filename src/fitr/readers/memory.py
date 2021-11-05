@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import sys
 import copy
 import struct
 
@@ -19,9 +20,11 @@ class FitFileMemory():
     def __len__(self):
         return len(self._memory)
 
-    def read(self, fmt, start=None, endian=0):
-        endian_fmt = f"{'>' if endian else '<'}{fmt}"
+    def read(self, fmt, start=None, endian='<'):
+        assert endian in ['>', '<']
+        endian_fmt = f"{endian}{fmt}"
         readsize = struct.calcsize(endian_fmt)
+
         if start is None:
             end = self._at + readsize
         else:
@@ -29,6 +32,7 @@ class FitFileMemory():
         assert end <= len(self), "Trying to read out of bounds"
         chunk = self._memory[self._at if start is None else start:end]
         if start is None:
+            #print(f"fmt_with_endian='{endian_fmt}' size={readsize}", file=sys.stderr)
             self._at = end
             self._last_read = readsize
         return struct.unpack(endian_fmt, chunk)

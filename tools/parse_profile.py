@@ -4,9 +4,8 @@ import sys
 import json
 import struct
 import inspect
+import datetime
 import functools
-
-from collections import defaultdict, OrderedDict
 
 import openpyxl
 
@@ -30,7 +29,7 @@ class Base():
                 if issubclass(v, Base):
                     return v.__name__
                 return v.__name__
-            elif isinstance(v, type(lambda x: x)) and v.__qualname__.startswith("BaseTypeParsers."):
+            elif isinstance(v, type(lambda x: x)) and "TypeParsers." in v.__qualname__:
                 return v.__qualname__
             elif isinstance(v, str):
                 return repr(v)
@@ -42,14 +41,14 @@ class Base():
                 return v
 
         out = []
-        out.append(f"{self.__class__.__name__}("),
+        out.append(f"{self.__class__.__name__}(")
         out.extend(
             f"    {k[1:] if k.startswith('_') else k}={render(v)}," for k, v in self.__dict__.items() if (
                 (isinstance(v, Map) and v)
                 or (not isinstance(v, Map) and v is not None)
             )
         )
-        out.append(f")"),
+        out.append(f")")
         return "\n".join(out)
 
 
@@ -179,13 +178,22 @@ class Map(Base):
 
 
 class Type(Base):
-    def __init__(self, name, base_type, values=None, comment=None):
+    def __init__(self, name, base_type, parser=None, values=None, comment=None):
         assert isinstance(name, str)
         assert isinstance(base_type, str)
         self.name = name
-        self.base_type = base_type
+        self._base_type = base_type
+        self._parser = parser
         self.values = values or Map(TypeValue, dict, int)
         self.comment = comment
+
+    @property
+    def parser(self):
+        return functools.partial(self._parser, self) if self._parser else lambda x: x
+
+    @property
+    def base_type(self):
+        return base_types.pick(True, name=self._base_type) or self._base_type
 
 
 class TypeValue(Base):
@@ -215,11 +223,29 @@ class Component(Base):
         self.num = num
         self.bit_offset = bit_offset
 
+    def parser(self, raw_value):
+        if raw_value is None:
+            return None
+
+        if isinstance(raw_value, type):
+            if self.bit_offset and self.bit_offset >= len(raw_value) << 3:
+                raise ValueError()
+            unpacked_num = 0
+            for value in reversed(raw_value):
+                unpacked_num = (unpacked_num << 8) + value
+
+            raw_value = unpacked_num
+
+        if isinstance(raw_value, int):
+            raw_value = (raw_value >> self.bit_offset) & ((1 << self.bits) - 1)
+
+        return raw_value
+
 
 class FieldBase(Base):
     def __init__(self, name, type, def_num=None, scale=None, offset=None, units=None, components=None, comment=None):
         self.name = name
-        self.type = type
+        self._type = type
         self.def_num = def_num
 
         self.components = components or Map(Component, list)
@@ -231,6 +257,10 @@ class FieldBase(Base):
             self.offset = offset
             self.units = units
         self.comment = comment
+
+    @property
+    def type(self):
+        return types.pick(True, name=self._type) or base_types.pick(True, name=self._type) or self._type
 
 
 class Field(FieldBase):
@@ -254,10 +284,10 @@ class ReferenceField(Base):
 
 
 class BaseType(Base):
-    def __init__(self, name, fmt, parse=lambda x: x, size=None, byte=None, type_num=None):
+    def __init__(self, name, fmt, parser=lambda x: x, size=None, byte=None, type_num=None):
         self.name = name
         self.fmt = fmt
-        self.parse = parse
+        self.parser = parser
         self.byte = byte
         self.type_num = type_num
         self.size = size if size is not None else struct.calcsize(self.fmt)
@@ -274,16 +304,24 @@ class BaseTypeParsers():
         return None if v == 0xFF else v
 
     def string(v):
+        if v is None:
+            return None
+        elif isinstance(v, bytes):
+            v = v.decode('utf-8', errors="replace")
         try:
-            s = v[:v.index('\0x00')]
+            s = v[:v.index('\x00')]
         except ValueError:
             s = v
-        return s.decode('utf-8', errors=replace) or None
+        return s or None
 
     def uint8z(v):
         return None if v == 0x0 else v
 
     def byte(v):
+        if v is None:
+            return None
+        if isinstance(v, int):
+            return None if v == 0xFF else v
         return None if all(b == 0xFF for b in v) else v
 
     def sint16(v):
@@ -322,27 +360,34 @@ class BaseTypeParsers():
     def bool(v):
         return True if v else False
 
+class TypeParsers():
+    def date_time(self, value):
+        max_offset_value = self.values.pick(name="min")
+        if value < max_offset_value:
+            return value
+        return datetime.datetime.fromtimestamp(value + GARMIN_EPOC_OFFSET) 
+    local_date_time = date_time
 
 base_types = Map(BaseType, dict, int)
 base_type_list = [
-    {"fmt":'B', "size":struct.calcsize('B'), "parse":BaseTypeParsers.enum,    "name":'enum'},
-    {"fmt":'b', "size":struct.calcsize('b'), "parse":BaseTypeParsers.sint8,   "name":'sint8'},
-    {"fmt":'B', "size":struct.calcsize('B'), "parse":BaseTypeParsers.uint8,   "name":'uint8'},
-    {"fmt":'s', "size":struct.calcsize('s'), "parse":BaseTypeParsers.string,  "name":'string'},
-    {"fmt":'B', "size":struct.calcsize('B'), "parse":BaseTypeParsers.uint8z,  "name":'uint8z'},
-    {"fmt":'B', "size":struct.calcsize('B'), "parse":BaseTypeParsers.byte,    "name":'byte'},
-    {"fmt":'h', "size":struct.calcsize('h'), "parse":BaseTypeParsers.sint16,  "name":'sint16'},
-    {"fmt":'H', "size":struct.calcsize('H'), "parse":BaseTypeParsers.uint16,  "name":'uint16'},
-    {"fmt":'i', "size":struct.calcsize('i'), "parse":BaseTypeParsers.sint32,  "name":'sint32'},
-    {"fmt":'I', "size":struct.calcsize('I'), "parse":BaseTypeParsers.uint32,  "name":'uint32'},
-    {"fmt":'f', "size":struct.calcsize('f'), "parse":BaseTypeParsers.float32, "name":'float32'},
-    {"fmt":'d', "size":struct.calcsize('d'), "parse":BaseTypeParsers.float64, "name":'float64'},
-    {"fmt":'H', "size":struct.calcsize('H'), "parse":BaseTypeParsers.uint16z, "name":'uint16z'},
-    {"fmt":'I', "size":struct.calcsize('I'), "parse":BaseTypeParsers.uint32z, "name":'uint32z'},
-    {"fmt":'q', "size":struct.calcsize('q'), "parse":BaseTypeParsers.sint64,  "name":'sint64'},
-    {"fmt":'Q', "size":struct.calcsize('Q'), "parse":BaseTypeParsers.uint64,  "name":'uint64'},
-    {"fmt":'Q', "size":struct.calcsize('Q'), "parse":BaseTypeParsers.uint64z, "name":'uint64z'},
-#    {"fmt":'B', "size":struct.calcsize('B'), "parse":BaseTypeParsers.bool,    "name":'bool'},
+    {"fmt":'B', "size":struct.calcsize('B'), "parser":BaseTypeParsers.enum,    "name":'enum'},
+    {"fmt":'b', "size":struct.calcsize('b'), "parser":BaseTypeParsers.sint8,   "name":'sint8'},
+    {"fmt":'B', "size":struct.calcsize('B'), "parser":BaseTypeParsers.uint8,   "name":'uint8'},
+    {"fmt":'s', "size":struct.calcsize('s'), "parser":BaseTypeParsers.string,  "name":'string'},
+    {"fmt":'B', "size":struct.calcsize('B'), "parser":BaseTypeParsers.uint8z,  "name":'uint8z'},
+    {"fmt":'B', "size":struct.calcsize('B'), "parser":BaseTypeParsers.byte,    "name":'byte'},
+    {"fmt":'h', "size":struct.calcsize('h'), "parser":BaseTypeParsers.sint16,  "name":'sint16'},
+    {"fmt":'H', "size":struct.calcsize('H'), "parser":BaseTypeParsers.uint16,  "name":'uint16'},
+    {"fmt":'i', "size":struct.calcsize('i'), "parser":BaseTypeParsers.sint32,  "name":'sint32'},
+    {"fmt":'I', "size":struct.calcsize('I'), "parser":BaseTypeParsers.uint32,  "name":'uint32'},
+    {"fmt":'f', "size":struct.calcsize('f'), "parser":BaseTypeParsers.float32, "name":'float32'},
+    {"fmt":'d', "size":struct.calcsize('d'), "parser":BaseTypeParsers.float64, "name":'float64'},
+    {"fmt":'H', "size":struct.calcsize('H'), "parser":BaseTypeParsers.uint16z, "name":'uint16z'},
+    {"fmt":'I', "size":struct.calcsize('I'), "parser":BaseTypeParsers.uint32z, "name":'uint32z'},
+    {"fmt":'q', "size":struct.calcsize('q'), "parser":BaseTypeParsers.sint64,  "name":'sint64'},
+    {"fmt":'Q', "size":struct.calcsize('Q'), "parser":BaseTypeParsers.uint64,  "name":'uint64'},
+    {"fmt":'Q', "size":struct.calcsize('Q'), "parser":BaseTypeParsers.uint64z, "name":'uint64z'},
+    {"fmt":'B', "size":struct.calcsize('B'), "parser":BaseTypeParsers.bool,    "name":'bool'},
 ]
 
 def parse_csv_field(field, items=0, func=lambda x: x):
@@ -372,7 +417,8 @@ def parse_types_sheet(sheet):
     for row in sheet.iter_rows(min_row=2, values_only=True):
         type_name, base_type, value_name, value, comment = row
         if type_name:
-            current_type = types[type_name] = Type(type_name, base_type)
+            type_parser = getattr(TypeParsers, type_name, None)
+            current_type = types[type_name] = Type(type_name, base_type, parser=type_parser)
             
         elif value is not None:
             try:
@@ -400,12 +446,15 @@ def parse_types_sheet(sheet):
 
 def format_base_types():
     base_type_map = {v.name:k for k, v in types['fit_base_type'].values.items()}
+    base_type_map["bool"] = 0
     for base_type_kwargs in base_type_list: 
         byte = base_type_map.get(base_type_kwargs["name"], {})
         base_types[byte] = BaseType(**{**base_type_kwargs, **{"byte": byte, "type_num": byte & 0x1F}})
 
 
 def get_type(type):
+    if not isinstance(type, str):
+        return type
     return base_types.get(type) or types.get(type)
 
 
@@ -522,22 +571,44 @@ def parse_message_sheet(sheet):
 
                 bit_offset = 0
                 for component in subfield.components:
-                    component.num = message.fields.pick(name=component.name),
+                    component.num = message.fields.pick(name=component.name)
                     component.bit_offset = bit_offset
                     bit_offset += component.bits
             bit_offset = 0
             for component in field.components:
-                component.num = message.fields.pick(name=component.name),
+                component.num = message.fields.pick(name=component.name)
                 component.bit_offset = bit_offset
                 bit_offset += component.bits
 
 
+GARMIN_EPOC_OFFSET = datetime.datetime.fromisoformat('1989-12-31T00:00:00').timestamp()
 
+obj2render = [
+    BaseTypeParsers,
+    TypeParsers,
+    Base,
+    Map,
+    BaseType,
+    Type,
+    TypeValue,
+    Message,
+    Component,
+    FieldBase,
+    Field,
+    SubField,
+    ReferenceField
+]
 
 def print_rendered():
+    print("# -*- coding: utf-8 -*-\n")
+    print("import math")
     print("import struct")
+    print("import datetime")
+    print("import functools")
     print("")
-    for obj in [BaseTypeParsers, Base, Map, BaseType, Type, TypeValue, Message, Component, FieldBase, Field, SubField, ReferenceField]:
+    print(f"{GARMIN_EPOC_OFFSET=}")
+    print("")
+    for obj in obj2render:
         print(inspect.getsource(obj))
         print("\n")
     print(f"base_types =", repr(base_types))

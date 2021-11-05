@@ -61,7 +61,11 @@ class FitFile():
 
     def messages(self):
         with ctxmng() as context:
-            while self._fitfile.tell() < self.file_size - 1:
+            while self._fitfile.tell() < self.file_size - 2:
                 message = self._read_message()
                 yield message
+
+            crc, *_ = self._fitfile.read("H")
+            calc_crc = self._fitfile.crc(0, self.file_size - 2)
+            assert crc == calc_crc, f"{crc} == {calc_crc}"
         return

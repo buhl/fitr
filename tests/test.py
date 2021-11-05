@@ -251,8 +251,8 @@ if __name__ == "__main__":
     except ValueError as e:
         ...
 
-    assert smap.pick(0) == mgb
-    assert smap.pick(name="srg") == 3
+    assert smap.pick(0) == grg, f"{smap.pick(0).name}"
+    assert smap.pick(name="srg") == 2
     assert smap.pick(True, name="grg") == grg
     assert len(smap) == 4
     assert set(smap) == {mgb, srg, grg, irg}
@@ -261,8 +261,8 @@ if __name__ == "__main__":
     assert set(smap) == {mgb, srg, irg}
 
     smap = Map(TypeValue, set, map={mgb, srg, grg, irg})
-    assert smap.pick(0) == mgb
-    assert smap.pick(name="srg") == 3
+    assert smap.pick(0) == grg
+    assert smap.pick(name="srg") == 2
     assert smap.pick(True, name="grg") == grg
     assert len(smap) == 4
     assert set(smap) == {mgb, srg, grg, irg}
