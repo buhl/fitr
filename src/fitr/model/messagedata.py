@@ -4,7 +4,7 @@ import functools
 
 from .message import Message
 from ..context import Ctx
-from ..profile import types, Base, Map
+from ..profile import types
 
 
 def read_field_def(field_def, reader):
@@ -45,7 +45,7 @@ def apply_scale_offset(field, raw_value):
     return raw_value
 
 
-class FieldData(Base):
+class FieldData():
     def __init__(self, fdef, field, parent_field, value, raw_value):
         self.fdef = fdef
         self.field = field
@@ -74,7 +74,7 @@ class MessageData(Message):
         fields = list(def_mesg.field_definitions) + list(def_mesg.developer_field_definitions)
         field_raw_values = {field: read_field_def(field, functools.partial(reader, endian=def_mesg.endian)) for field in fields}
 
-        data_fields = Map(FieldData, list)
+        data_fields = []
         for field_def, raw_value in field_raw_values.items():
             field, parent_field = field_def.field, None
 

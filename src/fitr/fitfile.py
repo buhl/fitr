@@ -10,7 +10,7 @@ class FitFile():
         self._start = self._fitfile.tell()
         self._read_file_header()
 
-        crc, *_ = self._fitfile.read("H", self.header_size + self.data_size)
+        crc = self._fitfile.read("H", self.header_size + self.data_size)
         calc_crc = self._fitfile.crc(0, self.file_size - 2)
         assert crc == calc_crc, f"{crc} == {calc_crc}"
 
@@ -49,7 +49,7 @@ class FitFile():
         self._fitfile.seek(readsize)
 
         if readsize < self._header_size:
-            crc, *_ = self._fitfile.read('H')
+            crc = self._fitfile.read('H')
             calculated_crc = self._fitfile.crc(0, readsize)
             assert crc == calculated_crc, "Invalid FitFile header crc"
             readsize += self._fitfile.readsize
@@ -65,7 +65,7 @@ class FitFile():
                 message = self._read_message()
                 yield message
 
-            crc, *_ = self._fitfile.read("H")
+            crc = self._fitfile.read("H")
             calc_crc = self._fitfile.crc(0, self.file_size - 2)
             assert crc == calc_crc, f"{crc} == {calc_crc}"
         return

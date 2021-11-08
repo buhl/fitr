@@ -2,17 +2,16 @@
 import functools
 
 from .message import Message
-from ..profile import Map, base_types, messages, types
-from ..profile import Base
+from ..profile import base_types, messages, types
 from ..context import Ctx
 
 
-class Accumulator(Map):
+class Accumulator():
     def __init__(self):
         super().__init__(int, dict, int)
 
 
-class FieldDefinition(Base):
+class FieldDefinition():
     def __init__(self, field, definition_number, base_type, size):
         self.field = field
         self.definition_number = definition_number
@@ -46,7 +45,7 @@ class FieldDefinition(Base):
         )
 
 
-class DeveloperFieldDefinition(Base):
+class DeveloperFieldDefinition():
     def __init__(self, dev_data_index, definition_number, size, field=None):
         self.dev_data_index = dev_data_index
         self.definition_number = definition_number
@@ -93,12 +92,12 @@ class MessageDefinition(Message):
         reader = functools.partial(reader, endian='>' if endian else '<')
         global_message_number, num_fields = reader('HB')
         message_type = messages.pick(True, global_number=global_message_number)
-        field_defs = Map(FieldDefinition, list)
+        field_defs = []
 
         for n in range(num_fields):
             field_defs.append(FieldDefinition.unpack(message_type, reader))
 
-        dev_field_defs = Map(DeveloperFieldDefinition, list)
+        dev_field_defs = []
         if header.developer_data:
             num_dev_fields = reader('B')[0]
             for n in range(num_dev_fields):

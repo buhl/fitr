@@ -2,3 +2,4 @@ aux/
 __pycache__/
 *.egg-info/
 *.py[cod]
+*.swp

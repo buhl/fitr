@@ -29,6 +29,7 @@ setup_dict = {
     'entry_points': {
         'console_scripts': [
             'FitR =  fitr.cli:run',
+            'LFitR =  fitr.lazy:run',
         ],
     },
 }

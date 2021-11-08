@@ -1,309 +1,96 @@
 #!/usr/bin/env python
-import re
 import sys
-import json
 import struct
+import typing
 import inspect
 import datetime
 import functools
 
 import openpyxl
 
+def noop(x): return x
 
-class Base():
-    def __str__(self):
-        return f"<{__name__}.{self.__class__.__name__}:{getattr(self, 'name', '')} at {hex(id(self))}>"
+def resolve(value, values): 
+    return values.get(value, {}).get("name", value)
 
-    def pack(self):
-        raise NotImplementedError
 
-    @classmethod
-    def unpack(self, stream):
-        raise NotImplementedError
-
-    def __repr__(self):
-        def render(v):
-            if isinstance(v, Base):
-                return f"{repr(v)}"
-            elif isinstance(v, type):
-                if issubclass(v, Base):
-                    return v.__name__
-                return v.__name__
-            elif isinstance(v, type(lambda x: x)) and "TypeParsers." in v.__qualname__:
-                return v.__qualname__
-            elif isinstance(v, str):
-                return repr(v)
-            elif isinstance(v, int):
-                return str(v)
-            elif isinstance(v, type(None)):
-                return "None"
-            else:
-                return v
-
-        out = []
-        out.append(f"{self.__class__.__name__}(")
-        out.extend(
-            f"    {k[1:] if k.startswith('_') else k}={render(v)}," for k, v in self.__dict__.items() if (
-                (isinstance(v, Map) and v)
-                or (not isinstance(v, Map) and v is not None)
+@functools.lru_cache(typed=True)
+def picker(values, filters):
+    try:
+        return next(
+            filter(
+                lambda x: all(x[1][k] == v for k, v in filters.items()),
+                values.items()
             )
         )
-        out.append(f")")
+    except StopIteration:
+        return (None, None)
+
+
+def render(data):
+    if isinstance(data, typing.List):
+        out = ["list(["]
+        for v in data:
+            out.append(f"  {render(v)},")
+        out.append("])")
         return "\n".join(out)
+    elif isinstance(data, typing.Dict):
+        out = ["dict({"]
+        for k, v in data.items():
+            out.append(f"  {render(k)}: {render(v)},")
+        out.append("})")
+        return "\n".join(out)
+    elif isinstance(data, type(noop)):
+        return data.__qualname__
+    elif isinstance(data, str):
+        return repr(data)
+    elif isinstance(data, int):
+        return str(data)
+    elif isinstance(data, type(None)):
+        return "None"
+    return data
 
 
-class Map(Base):
-    def __init__(self, value_type, map_type=list, key_type=str, map=None):
-        self._map = map_type() if map_type in [list, dict, set] else list()
-        self._map_type = type(self._map)
-        self._value_type = value_type
-        self._key_type = key_type if map_type == dict else int
+def parse_component_value(component, value):
+    if value is None:
+        return None
 
-        if map:
-            self._uptend(map)
+    if isinstance(value, tuple):
+        if component["bit_offset"] and component["bit_offset"] >= len(value) << 3:
+            raise ValueError()
 
-    def __len__(self):
-        return len(self._map)
+        unpacked_num = 0
+        for v in reversed(value):
+            unpacked_num = (unpacked_num << 8) + v
+        value = unpacked_num
 
-    def __bool__(self):
-        return bool(self._map)
+    if isinstance(value, int):
+        value = (value >> component["bit_offset"]) & ((1 << component["bits"]) - 1)
 
-    def __getitem__(self, key):
-        return self._map[key]
-
-    def __setitem__(self, key, value):
-        if isinstance(self._map, set):
-            raise TypeError(f"{self.__class.__name__} of 'set' type does not support item assignment")
-
-        if not isinstance(key, self._key_type):
-            raise IndexError(f"'{self.__class__.__name__}' index must be of type '{self._key_type}'")
-
-        if not isinstance(value, self._value_type):
-            raise ValueError(f"'{self.__class__.__name__}' value can only be '{self._value_type.__class__.__name__}'")
-        self._map[key] = value
-
-    def __iter__(self):
-        return iter(self._map)
-
-    def __delitem__(self, key):
-        if isinstance(self._map, set):
-            raise TypeError(f"{self.__class.__name__} of 'set' type does not support item deletion")
-        del self._map[key]
-
-    def __getattr__(self, attr):
-        if not (method := getattr(self._map, attr, False)):
-            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")
-
-        def check_value(value):
-            if not isinstance(value, self._value_type):
-                raise ValueError(f"'{self.__class__.__name__}' can only contain '{self._value_type.__class__.__name__}'")
- 
-
-        if isinstance(self._map, list):
-            if attr == "append":
-                def append(value):
-                    check_value(value)
-                    method(value)
-                return append
-                
-            elif attr ==  "extend":
-                def extend(values):
-                    for value in values:
-                        check_value(value)
-                    method(values)
-                return extend
-
-        elif isinstance(self._map, dict):
-            if attr == "update":
-                def check_key(key):
-                    if not isinstance(key, self._key_type):
-                        raise KeyError(f"'{self.__class__.__name__}' can only contain '{self._key_type.__class__.__name__}'")
-
-                def update(*args, **kwargs):
-                    for map in args:
-                        if hasattr(map, 'keys'):
-                            for k in map:
-                                check_key(k)
-                                check_value(map[k])
-                        else:
-                            for k, v in map:
-                                check_key(k)
-                                check_value(v)
-                    for k in kwargs:
-                        check_key(k)
-                        check_value(kwargs[k])
-
-                    return method(*args, **kwargs)
-                return update
-
-        elif isinstance(self._map, set):
-            if attr == "add":
-                def add(value):
-                    check_value(value)
-                    return method(value)
-                return add
-
-            elif attr == "symmetric_difference_update":
-                def symmetric_difference_update(value):
-                    [check_value(v) for v in value]
-                    return method(value)
-                return symmetric_difference_update
-                
-            elif attr.endswith("update"):
-                def updates(*values):
-                    for set_value in values:
-                        [check_value(v) for v in set_value]
-                    return method(*values)
-                return updates
-
-        else: 
-            raise AttributeError(f"'{self.__class__.__name__}' object does not support attribute '{attr}'")
-
-        return method
-
-    def _uptend(self, values):
-        attr = "update" if isinstance(self._map, (dict, set)) else "extend"
-        getattr(self, attr)(values)
-
-    def pick(self, key=..., **kwargs):
-        match = any if kwargs.pop("_match", None) == any else all 
-        ellipsis = type(...)
-        for k, v in enumerate(self._map) if isinstance(self._map, (list, set)) else self._map.items():
-            if not kwargs and key == k:
-                return v
-            if kwargs and match(getattr(v,a, ...) == kwargs[a] for a in kwargs):
-                if isinstance(key, bool) and key:
-                    return v
-                return k
+    return value
 
 
-class Type(Base):
-    def __init__(self, name, base_type, parser=None, values=None, comment=None):
-        assert isinstance(name, str)
-        assert isinstance(base_type, str)
-        self.name = name
-        self._base_type = base_type
-        self._parser = parser
-        self.values = values or Map(TypeValue, dict, int)
-        self.comment = comment
 
-    @property
-    def parser(self):
-        return functools.partial(self._parser, self) if self._parser else lambda x: x
+class dict(dict):
+    def __hash__(self):
+        return hash(tuple(self.items()))
 
-    @property
-    def base_type(self):
-        return base_types.pick(True, name=self._base_type) or self._base_type
-
-
-class TypeValue(Base):
-    def __init__(self, name, value, comment=None):
-        self.name = name
-        self.value = value
-        self.comment = comment
-
-
-class Message(Base):
-    def __init__(self, name, global_number, group_name, fields=None, comment=None):
-        self.name = name
-        self.global_number = global_number
-        self.group_name = group_name
-        self.fields = fields or Map(Field, dict, int)
-        self.comment = comment
-
-
-class Component(Base):
-    def __init__(self, name, scale=None, offset=None, units=None, bits=None, accumulate=None, num=None, bit_offset=None):
-        self.name = name
-        self.scale = scale
-        self.offset = offset
-        self.units = units
-        self.bits = bits
-        self.accumulate = accumulate
-        self.num = num
-        self.bit_offset = bit_offset
-
-    def parser(self, raw_value):
-        if raw_value is None:
-            return None
-
-        if isinstance(raw_value, type):
-            if self.bit_offset and self.bit_offset >= len(raw_value) << 3:
-                raise ValueError()
-            unpacked_num = 0
-            for value in reversed(raw_value):
-                unpacked_num = (unpacked_num << 8) + value
-
-            raw_value = unpacked_num
-
-        if isinstance(raw_value, int):
-            raw_value = (raw_value >> self.bit_offset) & ((1 << self.bits) - 1)
-
-        return raw_value
-
-
-class FieldBase(Base):
-    def __init__(self, name, type, def_num=None, scale=None, offset=None, units=None, components=None, comment=None):
-        self.name = name
-        self._type = type
-        self.def_num = def_num
-
-        self.components = components or Map(Component, list)
- 
-        if components and not str(scale).isdigit():
-            self.scale = self.offset = self.units = None
-        else:
-            self.scale = scale
-            self.offset = offset
-            self.units = units
-        self.comment = comment
-
-    @property
-    def type(self):
-        return types.pick(True, name=self._type) or base_types.pick(True, name=self._type) or self._type
-
-
-class Field(FieldBase):
-    def __init__(self, subfields=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.subfields = subfields or Map(SubField, list)
-
-
-class SubField(FieldBase):
-    def __init__(self, reference_fields=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.reference_fields = reference_fields or Map(ReferenceField, list)
-
-
-class ReferenceField(Base):
-    def __init__(self, name, value, def_num=None, raw_value=None):
-        self.name = name
-        self.value = value
-        self.def_num = def_num
-        self.raw_value = raw_value
-
-
-class BaseType(Base):
-    def __init__(self, name, fmt, parser=lambda x: x, size=None, byte=None, type_num=None):
-        self.name = name
-        self.fmt = fmt
-        self.parser = parser
-        self.byte = byte
-        self.type_num = type_num
-        self.size = size if size is not None else struct.calcsize(self.fmt)
+class list(list):
+    def __hash__(self):
+        return hash(tuple(self))
 
 
 class BaseTypeParsers():
-    def enum(v):
+    def enum(v, *_):
         return None if v == 0xFF else v
 
-    def sint8(v):
+    def sint8(v, *_):
         return None if v == 0x7F else v
 
-    def uint8(v):
+    def uint8(v, *_):
         return None if v == 0xFF else v
 
-    def string(v):
+    def string(v, *_):
         if v is None:
             return None
         elif isinstance(v, bytes):
@@ -314,61 +101,73 @@ class BaseTypeParsers():
             s = v
         return s or None
 
-    def uint8z(v):
+    def uint8z(v, *_):
         return None if v == 0x0 else v
 
-    def byte(v):
+    def byte(v, *_):
         if v is None:
             return None
         if isinstance(v, int):
             return None if v == 0xFF else v
         return None if all(b == 0xFF for b in v) else v
 
-    def sint16(v):
+    def sint16(v, *_):
         return None if v == 0x7FFF else v
 
-    def uint16(v):
+    def uint16(v, *_):
         return None if v == 0xFFFF else v
 
-    def sint32(v):
+    def sint32(v, *_):
         return None if v == 0x7FFFFFFF else v
 
-    def uint32(v):
+    def uint32(v, *_):
         return None if v == 0xFFFFFFFF else v
 
-    def float32(v):
+    def float32(v, *_):
         return None if math.isnan(v) else v
 
-    def float64(v):
+    def float64(v, *_):
         return None if math.isnan(v) else v
 
-    def uint16z(v):
+    def uint16z(v, *_):
         return None if v == 0x0 else v
 
-    def uint32z(v):
+    def uint32z(v, *_):
         return None if v == 0x0 else v
 
-    def sint64(v):
+    def sint64(v, *_):
         return None if v == 0x7FFFFFFFFFFFFFFF else v
 
-    def uint64(v):
+    def uint64(v, *_):
         return None if v == 0xFFFFFFFFFFFFFFFF else v
 
-    def uint64z(v):
+    def uint64z(v, *_):
         return None if v == 0 else v
 
-    def bool(v):
+    def bool(v, *_):
         return True if v else False
 
+
 class TypeParsers():
-    def date_time(self, value):
-        max_offset_value = self.values.pick(name="min")
+    def date_time(value, values):
+        if value is None:
+            return value
+        if isinstance(value, datetime.datetime):
+            return value
+        max_offset_value = picker(values, dict(name="min") )[0]
         if value < max_offset_value:
             return value
-        return datetime.datetime.fromtimestamp(value + GARMIN_EPOC_OFFSET) 
+        return datetime.datetime.utcfromtimestamp(value + GARMIN_EPOC_OFFSET) 
     local_date_time = date_time
 
-base_types = Map(BaseType, dict, int)
+    #def product(value, values):
+    #    if value in values:
+    #        return values[value]["name"]
+    #    return value
+    #product_name = product
+    #garmin_product = product
+
+
 base_type_list = [
     {"fmt":'B', "size":struct.calcsize('B'), "parser":BaseTypeParsers.enum,    "name":'enum'},
     {"fmt":'b', "size":struct.calcsize('b'), "parser":BaseTypeParsers.sint8,   "name":'sint8'},
@@ -387,8 +186,9 @@ base_type_list = [
     {"fmt":'q', "size":struct.calcsize('q'), "parser":BaseTypeParsers.sint64,  "name":'sint64'},
     {"fmt":'Q', "size":struct.calcsize('Q'), "parser":BaseTypeParsers.uint64,  "name":'uint64'},
     {"fmt":'Q', "size":struct.calcsize('Q'), "parser":BaseTypeParsers.uint64z, "name":'uint64z'},
-    {"fmt":'B', "size":struct.calcsize('B'), "parser":BaseTypeParsers.bool,    "name":'bool'},
+#    {"fmt":'B', "size":struct.calcsize('B'), "parser":BaseTypeParsers.bool,    "name":'bool'},
 ]
+
 
 def parse_csv_field(field, items=0, func=lambda x: x):
     if not field:
@@ -410,15 +210,28 @@ fix_units = lambda x: x.replace(' / ', '/').replace(' * ', '*').replace('(steps)
 #
 ## TYPES
 #
-#headers = [n.lower().replace(" ", "_") if n else n for n in next(ws_types.iter_rows(max_row=1, values_only=True))]
-
-types = Map(Type, dict, str)
+types = dict()
 def parse_types_sheet(sheet):
     for row in sheet.iter_rows(min_row=2, values_only=True):
         type_name, base_type, value_name, value, comment = row
+        if comment:
+            try:
+                comment = comment.decode("utf-8", ignore="replace").strip()
+            except AttributeError:
+                comment = comment.strip()
+        else:
+            comment = None
+
         if type_name:
-            type_parser = getattr(TypeParsers, type_name, None)
-            current_type = types[type_name] = Type(type_name, base_type, parser=type_parser)
+            type_parser = getattr(TypeParsers, type_name, resolve)
+            current_type = types[type_name] = dict({
+                "name":type_name,
+                "base_type": base_type, 
+                "parser":type_parser,
+                "values": {}
+            })
+            if comment:
+                current_type["comment"] = comment
             
         elif value is not None:
             try:
@@ -426,30 +239,41 @@ def parse_types_sheet(sheet):
             except ValueError as e:
                 int_value = int(value, 16)
 
-            current_type.values[int_value] = TypeValue(name=value_name, value=int_value, comment=comment)
+            current_type["values"][int_value] = dict({
+                "name":value_name,
+                "value":int_value
+            })
 
             if not comment:
                 continue
 
-            if not comment.startswith(f"0x{hex(int_value).upper()[2:]}"):  # doing range values
+            current_type["values"][int_value]["comment"] = comment
+
+            if not comment.startswith(f"0x{hex(int_value).upper()[2:]}"):  # no range values
                 continue
 
             start = int_value + 1
             end = int(comment.split()[2], 16)
             name = "_".join(value_name.split("_")[:-1])
             for n in range(start, end):
-                current_type.values[n] = TypeValue(name=f"{name}_{n}", value=n, comment=comment)
+                current_type["values"][n] = dict({
+                    "name": f"{name}_{n}",
+                    "value": n,
+                })
+                if comment:
+                    current_type["values"][n]["comment"] = comment
 
         else:
             assert not any(row), "We should not get here"
 
 
+base_types = {}
 def format_base_types():
-    base_type_map = {v.name:k for k, v in types['fit_base_type'].values.items()}
+    base_type_map = {v["name"]:k for k, v in types['fit_base_type']["values"].items()}
     base_type_map["bool"] = 0
     for base_type_kwargs in base_type_list: 
-        byte = base_type_map.get(base_type_kwargs["name"], {})
-        base_types[byte] = BaseType(**{**base_type_kwargs, **{"byte": byte, "type_num": byte & 0x1F}})
+        byte = base_type_map.get(base_type_kwargs["name"])
+        base_types[base_type_kwargs["name"]] = dict({**{**base_type_kwargs, **{"byte": byte, "type_num": byte & 0x1F}}})
 
 
 def get_type(type):
@@ -461,14 +285,14 @@ def get_type(type):
 #
 ## MESSAGES
 #
-messages = Map(Message, dict, str)
+messages = {}
 def parse_message_sheet(sheet):
+    global messages
     for row in sheet.iter_rows(min_row=2, values_only=True):
         if not any(bool(v) for i, v in enumerate(row) if i != 3):  # empty line or message group header
             if row[3] and len(row[3]):  # message group header
                 group_name = row[3].title()
             continue
-
         (
             message_name, field_def_num, field_name, field_type, array,
             components, scale, offset, units, bits, accumulate,
@@ -476,133 +300,148 @@ def parse_message_sheet(sheet):
         ) = row[:-3]
 
         if message_name:
-            current_message = messages[message_name] = Message(
+            global_number = next(filter(lambda x: x[1]["name"] == message_name, types["mesg_num"]["values"].items()))[0]
+            current_message = messages[global_number] = dict(
                     name=message_name,
-                    global_number=types["mesg_num"].values.pick(name=message_name),
+                    global_number=global_number,
                     group_name=group_name,
-                    fields=None,
+                    fields=dict(),
                     comment=comment
             )
             continue
 
-
-        component_fields = Map(Component, list)
+        component_fields = list()
         if components and (component_names := [c.strip() for c in components.split(",") if c.strip()]):
 
             num_components = len(component_names)
 
             component_fields.extend(
-                [Component(
-                    name=component_name,
-                    scale=component_scale,
-                    offset=component_offset,
-                    units=component_units,
-                    bits=component_bits,
-                    accumulate=component_accumulate
-                ) 
-                for component_name, component_scale, component_offset, component_units, component_bits, component_accumulate in zip(
-                    component_names,
-                    parse_csv_field(scale, num_components, fix_scale),
-                    parse_csv_field(offset, num_components),
-                    parse_csv_field(units, num_components, fix_units),
-                    parse_csv_field(bits, num_components),
-                    parse_csv_field(accumulate, num_components, bool)
-                )]
+                list(
+                    dict(
+                        name=component_name,
+                        scale=component_scale,
+                        offset=component_offset,
+                        units=component_units,
+                        bits=component_bits,
+                        accumulate=component_accumulate
+                    ) 
+                    for component_name, component_scale, component_offset, component_units, component_bits, component_accumulate in zip(
+                        component_names,
+                        parse_csv_field(scale, num_components, fix_scale),
+                        parse_csv_field(offset, num_components),
+                        parse_csv_field(units, num_components, fix_units),
+                        parse_csv_field(bits, num_components),
+                        parse_csv_field(accumulate, num_components, bool)
+                    )
+                )
             )
-
             
             assert len(component_fields) == num_components
-            assert all(c.name and c.bits for c in component_fields)
-
-
+            assert all(c["name"] and c["bits"] for c in component_fields)
 
         if field_def_num is not None:
-            current_field = current_message.fields[field_def_num] = Field(
+            current_field = current_message["fields"][field_def_num] = dict(
                 name=field_name,
                 type=field_type,
                 def_num=field_def_num,
                 scale=fix_scale(scale),
                 offset=offset,
                 units=fix_units(units),
-                components=component_fields,
-                comment=comment
+                subfields=list(),
+                components=component_fields
             )
+            if comment:
+                current_field["comment"] = comment
             continue
 
         elif field_name is not None:
-            subfield = SubField(
+            subfield = dict(
                 name=field_name,
                 type=field_type,
                 scale=fix_scale(scale),
                 offset=offset,
                 units=fix_units(units),
+                reference_fields=[],
                 components=component_fields,
-                comment=comment
+
             )
+            if comment:
+                subfield["comment"] = comment
 
             ref_field_names = parse_csv_field(ref_field_name)
             assert ref_field_names, f"{ref_field_name} {ref_field_names} {row}"
 
-            subfield.reference_fields.extend(
-                [ReferenceField(
-                    name=name,
-                    value=value,
-                    def_num=None,
-                    raw_value=None
-                ) for name, value in zip(ref_field_names, parse_csv_field(ref_field_value))
-                ]
+            subfield["reference_fields"].extend(
+                list(
+                    dict(
+                        name=name,
+                        value=value,
+                        def_num=None,
+                        raw_value=None
+                    ) for name, value in zip(ref_field_names, parse_csv_field(ref_field_value))
+                )
             )
 
-            assert len(subfield.reference_fields) == len(ref_field_names)
+            assert len(subfield["reference_fields"]) == len(ref_field_names)
             if "alert_type" not in ref_field_names:
-                current_field.subfields.append(subfield)
+                current_field["subfields"].append(subfield)
 
             continue
 
-    messages._map = {k:v for k ,v in sorted(messages._map.items(), key=lambda item: item[1].global_number)}
+    messages = dict({k:v for k ,v in sorted(messages.items(), key=lambda item: item[1]["global_number"])})
 
     for message_name, message in messages.items():
-        for _, field in message.fields.items():
-            for subfield in field.subfields:
-                for sub_ref_field in subfield.reference_fields:
-                    ref_field = message.fields.pick(True,  name=sub_ref_field.name)
-                    sub_ref_field.def_num = ref_field.def_num 
-                    sub_ref_field.raw_value = get_type(ref_field.type).values.pick(name=sub_ref_field.value) 
+        for _, field in message["fields"].items():
+            for subfield in field["subfields"]:
+                for sub_ref_field in subfield["reference_fields"]:
+                    ref_field = next(filter(lambda x: x[1]["name"] == sub_ref_field["name"], message["fields"].items()))[1]
+                    sub_ref_field["def_num"] = ref_field["def_num"] 
+                    sub_ref_field["raw_value"] = next(
+                        filter(
+                            lambda x: x[1]["name"] == sub_ref_field["value"],
+                            get_type(ref_field["type"])["values"].items()
+                        )
+                    )[0] 
 
                 bit_offset = 0
-                for component in subfield.components:
-                    component.num = message.fields.pick(name=component.name)
-                    component.bit_offset = bit_offset
-                    bit_offset += component.bits
+                for component in subfield["components"]:
+                    component["num"] = next(
+                        filter(
+                            lambda x: x[1]["name"] == component["name"],
+                            message["fields"].items()
+                        )
+                    )[0]
+                    component["bit_offset"] = bit_offset
+                    bit_offset += component["bits"]
             bit_offset = 0
-            for component in field.components:
-                component.num = message.fields.pick(name=component.name)
-                component.bit_offset = bit_offset
-                bit_offset += component.bits
+            for component in field["components"]:
+                component["num"] = next(
+                    filter(
+                        lambda x: x[1]["name"] == component["name"],
+                        message["fields"].items()
+                    )
+                )[0]
+                component["bit_offset"] = bit_offset
+                bit_offset += component["bits"]
 
 
-GARMIN_EPOC_OFFSET = datetime.datetime.fromisoformat('1989-12-31T00:00:00').timestamp()
+GARMIN_EPOC_OFFSET = datetime.datetime.fromisoformat('1989-12-31T00:00:00+00:00').timestamp()
 
 obj2render = [
+    noop,
+    picker,
+    resolve,
+    parse_component_value,
+    dict,
+    list,
     BaseTypeParsers,
-    TypeParsers,
-    Base,
-    Map,
-    BaseType,
-    Type,
-    TypeValue,
-    Message,
-    Component,
-    FieldBase,
-    Field,
-    SubField,
-    ReferenceField
+    TypeParsers
 ]
+
 
 def print_rendered():
     print("# -*- coding: utf-8 -*-\n")
     print("import math")
-    print("import struct")
     print("import datetime")
     print("import functools")
     print("")
@@ -611,9 +450,10 @@ def print_rendered():
     for obj in obj2render:
         print(inspect.getsource(obj))
         print("\n")
-    print(f"base_types =", repr(base_types))
-    print(f"types =", repr(types))
-    print(f"messages =", repr(messages))
+    print(f"base_types = {render(base_types)}")
+    print(f"types = {render(types)}")
+    print(f"messages = {render(messages)}")
+
 
 def dofile(file):
     wb = openpyxl.load_workbook(file)
@@ -623,7 +463,6 @@ def dofile(file):
     format_base_types()
     parse_message_sheet(ws_messages)
     print_rendered()
-
 
 
 if __name__ == "__main__":

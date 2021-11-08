@@ -31,11 +31,14 @@ class FitFileMemory():
             end = start + readsize
         assert end <= len(self), "Trying to read out of bounds"
         chunk = self._memory[self._at if start is None else start:end]
+        unpacked = struct.unpack(endian_fmt, chunk)
         if start is None:
-            #print(f"fmt_with_endian='{endian_fmt}' size={readsize}", file=sys.stderr)
+            #print(f"fmt_with_endian='{endian_fmt}' size={readsize} {unpacked=}", file=sys.stderr)
             self._at = end
             self._last_read = readsize
-        return struct.unpack(endian_fmt, chunk)
+        if len(unpacked) == 1:
+            return unpacked[0]
+        return unpacked
 
     @property
     def readsize(self):

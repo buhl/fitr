@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from .. import model
 from ..context import Ctx, DevDataType, DevField
-from ..profile import Base,base_types
+from ..profile import base_types
 
 def get_message_field_raw_value(message, field_name):
     field = message.fields.pick(True, name=field_name)
@@ -36,7 +36,7 @@ def register_developer_field(message):
         native_field_num=native_field_num
     )
 
-class Message(Base):
+class Message():
     def __init__(self, header):
         self.header = header
 
